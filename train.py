@@ -150,7 +150,7 @@ def train_model(
                                 'images': wandb.Image(images[0].cpu()),
                                 'masks': {
                                     'true': wandb.Image(true_masks[0].float().cpu()),
-                                    'pred': wandb.Image(masks_pred.argmax(dim=1)[0].float().cpu()),
+                                    'pred': wandb.Image((torch.sigmoid(masks_pred)[0] > 0.5).float().cpu()),
                                 },
                                 'step': global_step,
                                 'epoch': epoch,

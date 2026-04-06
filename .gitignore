@@ -1,9 +1,14 @@
 *.pyc
-data/
 __pycache__/
-checkpoints/
-*.pth
-*.jpg
 venv/
 .idea/
 wandb/
+
+# ignorar todo por defecto
+data/*
+checkpoints/
+*.pth
+
+# PERMITIR lo necesario
+!data/imgs/
+!data/masks/

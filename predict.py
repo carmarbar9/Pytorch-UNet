@@ -5,12 +5,30 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+import cv2
 from PIL import Image
 from torchvision import transforms
 
 from utils.data_loading import BasicDataset
 from unet import UNet
 from utils.utils import plot_img_and_mask
+
+def overlay_mask_on_image(image_pil, mask):
+    image = np.array(image_pil)
+
+    # asegurar RGB
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+    overlay = image.copy()
+
+    # color del tumor
+    overlay[mask == 1] = [255, 0, 0]
+
+    alpha = 0.4
+    result = cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
+
+    return result
 
 def predict_img(net,
                 full_img,
@@ -48,6 +66,8 @@ def get_args():
                         help='Scale factor for the input images')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+
+    parser.add_argument('--overlay', action='store_true', help='Overlay mask on original image')
     
     return parser.parse_args()
 
@@ -111,6 +131,22 @@ if __name__ == '__main__':
             result = mask_to_image(mask, mask_values)
             result.save(out_filename)
             logging.info(f'Mask saved to {out_filename}')
+
+        if args.overlay:
+            overlay = overlay_mask_on_image(img, mask)
+
+            # guardar
+            overlay_filename = out_files[i].replace(".png", "_overlay.png")
+            cv2.imwrite(overlay_filename, overlay)
+            logging.info(f'Overlay guardado en {overlay_filename}')
+
+            import matplotlib.pyplot as plt
+
+            plt.figure()
+            plt.title("Overlay prediction")
+            plt.imshow(overlay)
+            plt.axis('off')
+            plt.show()
 
         if args.viz:
             logging.info(f'Visualizing results for image {filename}, close to continue...')

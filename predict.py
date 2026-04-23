@@ -14,7 +14,7 @@ from unet import UNet
 from utils.utils import plot_img_and_mask
 
 def overlay_mask_on_image(image_pil, mask):
-    image = np.array(image_pil)
+    image = np.array(image_pil.convert('RGB'))
 
     # asegurar RGB
     if len(image.shape) == 2:
@@ -29,6 +29,54 @@ def overlay_mask_on_image(image_pil, mask):
     result = cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
 
     return result
+
+
+def overlay_ground_truth_on_image(image_pil, mask):
+    image = np.array(image_pil.convert('RGB'))
+
+    # asegurar RGB
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+    overlay = image.copy()
+
+    # color de la mascara real
+    overlay[mask == 1] = [0, 255, 0]
+
+    alpha = 0.4
+    result = cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
+
+    return result
+
+
+def load_ground_truth_mask(filename, target_size):
+    mask_filename = os.path.basename(filename)
+    mask_path = os.path.join('data', 'pred', 'masks', mask_filename)
+
+    if not os.path.exists(mask_path):
+        logging.info(f'Ground truth mask not found for {filename}: {mask_path}')
+        return None
+
+    mask_img = Image.open(mask_path).convert('L')
+    if mask_img.size != target_size:
+        mask_img = mask_img.resize(target_size, resample=Image.NEAREST)
+
+    mask = np.array(mask_img)
+    return (mask > 0).astype(np.uint8)
+
+
+def dice_score(pred_mask, true_mask):
+    pred_mask = pred_mask.astype(bool)
+    true_mask = true_mask.astype(bool)
+
+    intersection = np.logical_and(pred_mask, true_mask).sum()
+    denominator = pred_mask.sum() + true_mask.sum()
+
+    if denominator == 0:
+        return 1.0
+
+    return (2 * intersection) / denominator
+
 
 def predict_img(net,
                 full_img,
@@ -125,6 +173,12 @@ if __name__ == '__main__':
                            scale_factor=args.scale,
                            out_threshold=args.mask_threshold,
                            device=device)
+        gt_mask = load_ground_truth_mask(filename, img.size)
+        dice = None
+
+        if gt_mask is not None:
+            dice = dice_score(mask, gt_mask)
+            logging.info(f'Dice Score: {dice:.2f}')
 
         if not args.no_save:
             out_filename = out_files[i]
@@ -136,16 +190,36 @@ if __name__ == '__main__':
             overlay = overlay_mask_on_image(img, mask)
 
             # guardar
-            overlay_filename = out_files[i].replace(".png", "_overlay.png")
-            cv2.imwrite(overlay_filename, overlay)
+            overlay_filename = f'{os.path.splitext(out_files[i])[0]}_overlay.png'
+            cv2.imwrite(overlay_filename, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
             logging.info(f'Overlay guardado en {overlay_filename}')
 
             import matplotlib.pyplot as plt
 
-            plt.figure()
-            plt.title("Overlay prediction")
-            plt.imshow(overlay)
-            plt.axis('off')
+            if gt_mask is not None:
+                overlay_gt = overlay_ground_truth_on_image(img, gt_mask)
+                overlay_gt_filename = f'{os.path.splitext(out_files[i])[0]}_overlay_gt.png'
+                cv2.imwrite(overlay_gt_filename, cv2.cvtColor(overlay_gt, cv2.COLOR_RGB2BGR))
+                logging.info(f'Overlay ground truth guardado en {overlay_gt_filename}')
+
+                plt.figure()
+                plt.suptitle(f'Dice Score: {dice:.2f}')
+
+                plt.subplot(1, 2, 1)
+                plt.title("Overlay prediction")
+                plt.imshow(overlay)
+                plt.axis('off')
+
+                plt.subplot(1, 2, 2)
+                plt.title("Overlay ground truth")
+                plt.imshow(overlay_gt)
+                plt.axis('off')
+            else:
+                plt.figure()
+                plt.title("Overlay prediction")
+                plt.imshow(overlay)
+                plt.axis('off')
+
             plt.show()
 
         if args.viz:

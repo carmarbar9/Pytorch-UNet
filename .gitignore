@@ -12,3 +12,4 @@ checkpoints/
 # PERMITIR lo necesario
 !data/imgs/
 !data/masks/
+!data/pred/

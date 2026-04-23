@@ -25,19 +25,20 @@ dir_checkpoint = Path('./checkpoints/')
 
 
 def train_model(
-        model,
-        device,
-        epochs: int = 5,
-        batch_size: int = 1,
-        learning_rate: float = 1e-5,
-        val_percent: float = 0.1,
-        save_checkpoint: bool = True,
-        img_scale: float = 0.5,
-        amp: bool = False,
-        weight_decay: float = 1e-8,
-        momentum: float = 0.999,
-        gradient_clipping: float = 1.0,
+        model,                   # Modelo U-Net que se va a entrenar
+        device,                  # Dispositivo de ejecución: CPU o GPU
+        epochs: int = 5,         # Número de épocas completas de entrenamiento
+        batch_size: int = 1,     # Número de imágenes procesadas en cada batch
+        learning_rate: float = 1e-5,   # Tasa de aprendizaje del optimizador
+        val_percent: float = 0.1,      # Porcentaje de datos reservado para validación
+        save_checkpoint: bool = True,  # Guardar un checkpoint al final de cada época
+        img_scale: float = 0.5,        # Factor para redimensionar las imágenes
+        amp: bool = False,             # Activa mixed precision para ahorrar memoria
+        weight_decay: float = 1e-8,    # Regularización para evitar sobreajuste
+        momentum: float = 0.999,       # Parámetro del optimizador RMSprop
+        gradient_clipping: float = 1.0,# Límite para evitar gradientes demasiado grandes
 ):
+    
     # 1. Create dataset
     try:
         dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
@@ -80,6 +81,7 @@ def train_model(
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
+    best_dice = 0
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -143,6 +145,14 @@ def train_model(
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
+                        if val_score > best_dice:
+                            best_dice = val_score
+                            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+                            state_dict = model.state_dict()
+                            state_dict['mask_values'] = dataset.mask_values
+                            torch.save(state_dict, str(dir_checkpoint / 'best_model.pth'))
+                            logging.info('New best model saved with Dice score: {}'.format(best_dice))
+
                         try:
                             experiment.log({
                                 'learning rate': optimizer.param_groups[0]['lr'],

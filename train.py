@@ -51,7 +51,8 @@ def train_model(
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # 3. Create data loaders
-    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
+    #loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
+    loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=False) #De esta forma es más eficiente, muchos workers en Windows ralentizan en lugar de acelerar
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
@@ -75,10 +76,13 @@ def train_model(
     ''')
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.RMSprop(model.parameters(),
-                              lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
+    #optimizer = optim.RMSprop(model.parameters(),
+    #                          lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate) #Con este optimizador realiza menos iteraciones, por lo que tarda menos tiempo
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    amp = False
+    grad_scaler = torch.cuda.amp.GradScaler(enabled=False) #amp solo ayuda si tenemos GPU. Como no es el caso, en CPU añade overhead
+    #grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
     best_dice = 0
@@ -130,7 +134,8 @@ def train_model(
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 # Evaluation round
-                division_step = (n_train // (5 * batch_size))
+                #division_step = (n_train // (5 * batch_size))
+                division_step = n_train + 1 #desactivamos las evaluaciones intermedias que son costosas, lo que acelera bastante el proceso
                 if division_step > 0:
                     if global_step % division_step == 0:
                         histograms = {}

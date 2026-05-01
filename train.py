@@ -13,7 +13,6 @@ from torch import optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-import wandb
 from evaluate import evaluate
 from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset
@@ -22,6 +21,34 @@ from utils.dice_score import dice_loss
 dir_img = Path('./data/imgs/')
 dir_mask = Path('./data/masks/')
 dir_checkpoint = Path('./checkpoints/')
+
+
+class DisabledExperiment:
+    def __init__(self):
+        self.config = self
+
+    def update(self, *args, **kwargs):
+        pass
+
+    def log(self, *args, **kwargs):
+        pass
+
+
+def init_experiment(wandb_mode):
+    if wandb_mode == 'disabled':
+        return DisabledExperiment()
+
+    try:
+        import wandb
+    except ImportError:
+        logging.warning('wandb is not installed. Training will continue without W&B logging.')
+        return DisabledExperiment()
+
+    try:
+        return wandb.init(project='U-Net', resume='allow', anonymous='must', mode=wandb_mode)
+    except Exception as error:
+        logging.warning('Could not start W&B (%s). Training will continue with W&B disabled.', error)
+        return DisabledExperiment()
 
 
 def train_model(
@@ -37,6 +64,7 @@ def train_model(
         weight_decay: float = 1e-8,    # Regularización para evitar sobreajuste
         momentum: float = 0.999,       # Parámetro del optimizador RMSprop
         gradient_clipping: float = 1.0,# Límite para evitar gradientes demasiado grandes
+        wandb_mode: str = 'disabled',  # disabled avoids login; offline saves local logs; online uploads to W&B
 ):
 
     # 1. Create dataset
@@ -57,10 +85,11 @@ def train_model(
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
     # (Initialize logging)
-    experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
+    experiment = init_experiment(wandb_mode)
     experiment.config.update(
         dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-             val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
+             val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale,
+             amp=amp, wandb_mode=wandb_mode)
     )
 
     logging.info(f'''Starting training:
@@ -86,7 +115,7 @@ def train_model(
     #grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
-    best_dice = 0
+    best_dice = -float('inf')
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -134,46 +163,27 @@ def train_model(
                 })
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
-                # Evaluation round
-                #division_step = (n_train // (5 * batch_size))
-                division_step = n_train + 1 #desactivamos las evaluaciones intermedias que son costosas, lo que acelera bastante el proceso
-                if division_step > 0:
-                    if global_step % division_step == 0:
-                        histograms = {}
-                        for tag, value in model.named_parameters():
-                            tag = tag.replace('/', '.')
-                            if not (torch.isinf(value) | torch.isnan(value)).any():
-                                histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
-                                histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+        val_score = evaluate(model, val_loader, device, amp)
+        scheduler.step(val_score)
 
-                        val_score = evaluate(model, val_loader, device, amp)
-                        scheduler.step(val_score)
+        logging.info('Validation Dice score: {}'.format(val_score))
+        if val_score > best_dice:
+            best_dice = val_score
+            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+            state_dict = model.state_dict()
+            state_dict['mask_values'] = dataset.mask_values
+            torch.save(state_dict, str(dir_checkpoint / 'best_model.pth'))
+            logging.info('New best model saved with Dice score: {}'.format(best_dice))
 
-                        logging.info('Validation Dice score: {}'.format(val_score))
-                        if val_score > best_dice:
-                            best_dice = val_score
-                            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-                            state_dict = model.state_dict()
-                            state_dict['mask_values'] = dataset.mask_values
-                            torch.save(state_dict, str(dir_checkpoint / 'best_model.pth'))
-                            logging.info('New best model saved with Dice score: {}'.format(best_dice))
-
-                        try:
-                            experiment.log({
-                                'learning rate': optimizer.param_groups[0]['lr'],
-                                'validation Dice': val_score,
-                                'images': wandb.Image(images[0].cpu()),
-                                'masks': {
-                                    'true': wandb.Image(true_masks[0].float().cpu()),
-                                    'pred': wandb.Image((torch.sigmoid(masks_pred)[0] > 0.5).float().cpu()),
-                                },
-                                'step': global_step,
-                                'epoch': epoch,
-                                **histograms
-                            })
-                        except:
-                            pass
+        try:
+            experiment.log({
+                'learning rate': optimizer.param_groups[0]['lr'],
+                'validation Dice': val_score,
+                'step': global_step,
+                'epoch': epoch
+            })
+        except:
+            pass
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
@@ -196,6 +206,8 @@ def get_args():
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--wandb-mode', choices=['disabled', 'offline', 'online'], default='disabled',
+                        help='Weights & Biases mode: disabled avoids login, offline saves local logs, online uploads runs')
 
     return parser.parse_args()
 
@@ -231,7 +243,8 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            wandb_mode=args.wandb_mode
         )
     except torch.cuda.OutOfMemoryError:
         logging.error('Detected OutOfMemoryError! '
@@ -247,5 +260,6 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            wandb_mode=args.wandb_mode
         )
